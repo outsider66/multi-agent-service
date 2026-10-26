@@ -1,0 +1,26 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # 默认离线 Mock；要接 compose 内的 Ollama，改成 ollama/qwen2.5:7b
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-mock/demo}
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      API_KEY: ${API_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    volumes:
+      - ./data:/app/data
+
+  # 可选服务：docker compose --profile ollama up --build
+  # 首次使用需进入容器拉模型：docker compose exec ollama ollama pull qwen2.5:7b
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  ollama_data:

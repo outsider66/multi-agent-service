@@ -1,0 +1,4 @@
+# 可选：启用 CrewAI 编排器。
+# 注意：CrewAI 依赖较重，且对 Python 版本有要求；默认内置编排器不需要安装它。
+-r requirements.txt
+crewai>=0.80
