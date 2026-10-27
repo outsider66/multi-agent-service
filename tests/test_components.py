@@ -35,7 +35,50 @@ def test_model_routing_and_missing_configuration():
     with pytest.raises(ProviderNotConfiguredError):
         registry.get("openai/gpt-4o-mini")
 
+def test_vllm_provider_routing_and_client():
+    # 配置齐全的场景：验证路由解析、实例类型、请求地址、模型列表暴露
+    settings = Settings(
+        _env_file=None,
+        default_provider="mock",
+        vllm_base_url="http://127.0.0.1:8001/v1",
+        vllm_model="qwen2:latest",
+        openai_api_key="",
+        oneapi_api_key="",
+    )
+    registry = LLMRegistry(settings)
 
+    # 1. resolve：vllm/xxx 应被拆成 provider + upstream_model
+    route = registry.resolve("vllm/qwen2:latest")
+    assert route.provider == "vllm"
+    assert route.upstream_model == "qwen2:latest"
+    assert route.canonical_id == "vllm/qwen2:latest"
+
+    # 2. resolve：只写 vllm/ 时应回落到 Settings.vllm_model
+    fallback = registry.resolve("vllm/")
+    assert fallback.upstream_model == "qwen2:latest"
+
+    # 3. get：应拿到 OpenAICompatibleLLM，且 base_url 指向 vLLM
+    llm, _ = registry.get("vllm/qwen2:latest")
+    assert isinstance(llm, OpenAICompatibleLLM)
+    assert llm.chat_url == "http://127.0.0.1:8001/v1/chat/completions"
+
+    # 4. list_models：GET /v1/models 要能看到 vllm 模型
+    ids = [item["id"] for item in registry.list_models()]
+    assert "vllm/qwen2:latest" in ids
+
+def test_vllm_missing_configuration():
+    # 配置缺失的场景：base_url 为空时必须抛 ProviderNotConfiguredError
+    settings = Settings(
+        _env_file=None,
+        vllm_base_url="",
+        vllm_model="",
+        openai_api_key="",
+        oneapi_api_key="",
+    )
+    registry = LLMRegistry(settings)
+
+    with pytest.raises(ProviderNotConfiguredError):
+        registry.get("vllm/Qwen2.5-7B-Instruct")
 def test_openai_compatible_client_complete_and_stream():
     captured = []
 

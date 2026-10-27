@@ -17,7 +17,7 @@ from app.llm.base import BaseLLM
 from app.llm.mock import MockLLM
 from app.llm.openai_compat import OpenAICompatibleLLM
 
-KNOWN_PROVIDERS = ("mock", "openai", "oneapi", "ollama")
+KNOWN_PROVIDERS = ("mock", "openai", "oneapi", "ollama", "vllm")
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,7 @@ class LLMRegistry:
             "openai": self.settings.openai_model,
             "oneapi": self.settings.oneapi_model,
             "ollama": self.settings.ollama_model,
+            "vllm": self.settings.vllm_model,
             "mock": "demo",
         }.get(provider, "demo")
 
@@ -116,6 +117,21 @@ class LLMRegistry:
                 timeout_seconds=self.settings.request_timeout_seconds,
                 max_retries=self.settings.provider_max_retries,
             )
+        elif route.provider == "vllm":
+            # vLLM 不校验 Key，但必须知道服务地址；地址为空说明没配置
+            if not self.settings.vllm_base_url.strip():
+                raise ProviderNotConfiguredError(
+                    "未配置 VLLM_BASE_URL。请在 .env 中填写 vLLM 服务地址，"
+                    "例如 http://localhost:8080/v1 。"
+                )
+            llm = OpenAICompatibleLLM(
+                provider="vllm",
+                model=route.upstream_model,
+                base_url=self.settings.vllm_base_url,
+                api_key="",  # VLLM 默认不校验 Key
+                timeout_seconds=self.settings.request_timeout_seconds,
+                max_retries=self.settings.provider_max_retries,
+            )
         else:  # pragma: no cover - resolve 已限制
             raise ProviderNotConfiguredError(f"未知 provider: {route.provider}")
 
@@ -148,6 +164,14 @@ class LLMRegistry:
                     "id": f"ollama/{self.settings.ollama_model}",
                     "object": "model",
                     "owned_by": "ollama",
+                }
+            )
+        if self.settings.vllm_base_url.strip():
+            models.append(
+                {
+                    "id": f"vllm/{self.settings.vllm_model}",
+                    "object": "model",
+                    "owned_by": "vllm",
                 }
             )
         # 去重，保持顺序

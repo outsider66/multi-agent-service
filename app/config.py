@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     oneapi_model: str = "gpt-4o-mini"
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "qwen2:latest"
+    vllm_base_url: str = "http://localhost:8080/v1"
+    vllm_model: str = "qwen2:latest"
 
     request_timeout_seconds: float = Field(default=120.0, gt=0)
     provider_max_retries: int = Field(default=1, ge=0, le=5)
