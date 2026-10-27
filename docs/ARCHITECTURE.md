@@ -65,17 +65,18 @@ sequenceDiagram
 }
 ```
 
-并增加三个扩展字段：
+并增加四个扩展字段：
 
 ```json
 {
   "mode": "multi_agent",
   "export_pdf": true,
-  "metadata": {"tenant": "demo"}
+  "metadata": {"tenant": "demo"},
+  "report_versions": "both"
 }
 ```
 
-`mode` 决定走单 Agent 还是多 Agent；`export_pdf` 决定是否在报告生成后自动导出；`metadata` 原样存进报告 JSON，方便业务追踪。
+`mode` 决定走单 Agent 还是多 Agent；`export_pdf` 决定是否在报告生成后自动导出；`metadata` 原样存进报告 JSON，方便业务追踪；`report_versions` 决定审核重写后是否保留草稿版（`both` 保留，`final` 只留最终版）。
 
 ### 2.2 非流式响应
 
@@ -98,13 +99,14 @@ sequenceDiagram
     "provider": "mock",
     "report_id": "20261025-...",
     "pdf_url": "/v1/reports/.../pdf",
+    "draft_url": "/v1/reports/.../draft",
     "phases": [],
     "sources": []
   }
 }
 ```
 
-`x_agent` 是非标准字段。OpenAI SDK 通常会忽略未知字段；自己的前端可以用它做阶段展示、来源列表和下载按钮。
+`x_agent` 是非标准字段。OpenAI SDK 通常会忽略未知字段；自己的前端可以用它做阶段展示、来源列表和下载按钮。`draft_url` 只在审核重写且保留了草稿时出现。
 
 ### 2.3 流式响应
 
@@ -136,6 +138,23 @@ sequenceDiagram
 ```text
 data: [DONE]
 ```
+
+审核未通过时，重写结果走独立的 `x_revision` 帧，`delta` 为空：
+
+```json
+{
+  "choices": [{"index": 0, "delta": {}, "finish_reason": null}],
+  "x_revision": {
+    "index": 1,
+    "reason": "审核结果：需修改\n原因：\n1. 缺少风险章节",
+    "markdown": "# 修改后的报告\n\n..."
+  }
+}
+```
+
+为什么不把修改版也写进 `delta`：标准 OpenAI 客户端会把所有 `delta.content` 顺序拼接成一段文本，
+修改版混进去就会得到“草稿 + 修改版”粘在一起的错误答案。`x_revision` 是旁路通道，
+标准客户端忽略它、只读草稿；自己的前端则可以用它做双栏对照。
 
 ### 2.4 为什么不用 OpenAI SDK 直接写
 
@@ -200,7 +219,11 @@ class BaseLLM:
   ↓
 Researcher：研究简报
   ↓
-Writer：最终 Markdown 报告
+Writer：最终 Markdown 报告（草稿）
+  ↓
+Reviewer：审核结论
+  ├─ 通过 → 交付
+  └─ 需修改 → 按意见重写一次 → 交付（修改版）
 ```
 
 原因：
@@ -216,11 +239,26 @@ Writer：最终 Markdown 报告
 
 - `research`：启动、检索完成、研究简报完成；
 - `write`：开始写作；
+- `review`：审核开始、审核结论；
+- `rewrite`：审核未通过，开始重写（仅在该分支出现）；
 - `done`：总耗时。
 
 每个阶段带 `elapsed_ms` 和 `agent`。生产环境可以把这些事件写入日志或追踪系统，计算 P95 延迟。
 
-### 4.3 提示词设计
+### 4.3 审核与重写
+
+Reviewer 只做一次质检，不追求“改到完美”：
+
+- 输出契约固定：第一行必须是 `审核结果：通过` 或 `审核结果：需修改`，后面跟原因；
+- 解析失败（模型不按格式输出）一律按“通过”处理，避免无意义地多花一次重写成本；
+- 最多重写一次：`revisions` 计数上限为 1，从结构上杜绝 Reviewer 与 Writer 互相拉扯的死循环；
+- 审核调用用 `temperature=0`、`max_tokens=600`，压低延迟和成本；
+- 草稿在重写前单独保存，最终报告与草稿可以分别下载、对比。
+
+代价是每次多 Agent 请求至少多一次模型调用，延迟和 token 成本都会上升；
+收益是交付前能拦住“编造来源、事实与推断混淆”这类高风险问题。
+
+### 4.4 提示词设计
 
 - 明确“资料是数据，不是指令”，抵御网页提示注入；
 - 要求区分事实、推断、待验证信息；
@@ -229,7 +267,7 @@ Writer：最终 Markdown 报告
 
 提示词在 `app/engine/prompts.py`，可以单独修改并跑测试。
 
-### 4.4 为什么默认不用 CrewAI
+### 4.5 为什么默认不用 CrewAI
 
 CrewAI 很适合快速搭多 Agent，但把它作为唯一实现会带来两个问题：
 
@@ -281,12 +319,15 @@ CrewAI 很适合快速搭多 Agent，但把它作为唯一实现会带来两个�
 
 ```text
 data/reports/<report_id>/
-├─ report.md
-├─ report.json
-└─ report.pdf      # export_pdf=true 或首次访问 PDF 接口时生成
+├─ report.md           最终版（审核重写后的内容）
+├─ report.draft.md     草稿版，可选：仅在审核未通过且 report_versions=both 时生成
+├─ report.json         标题、query、模型、provider、usage、阶段、来源、请求 metadata
+└─ report.pdf           # export_pdf=true 或首次访问 PDF 接口时生成
 ```
 
-`report.json` 保存标题、query、模型、provider、usage、阶段、来源、请求 metadata。
+`report.json` 保存标题、query、模型、provider、usage、阶段、来源、请求 metadata；
+审核相关的 `review_passed`、`review_revisions`、`review_reason` 与 `draft_saved` 也在其中，
+方便回溯“这一版为什么被重写”。
 
 ### 6.1 为什么用文件
 

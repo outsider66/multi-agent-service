@@ -22,7 +22,7 @@ OpenAI 兼容 API
       ↓
 模型适配层（Mock / OpenAI / OneAPI / Ollama）
       ↓
-多智能体编排（Researcher → Writer）
+多智能体编排（Researcher → Writer → Reviewer）
       ↓
 本地知识库检索 + 可选联网检索
       ↓
@@ -39,11 +39,11 @@ Markdown + JSON 元数据 + PDF 报告
 | 兼容 OpenAI 调用格式 | `/v1/models`、`chat.completion`、`chat.completion.chunk`、`[DONE]` | `app/api/` |
 | 多模型适配层 | 统一 `complete` / `stream` 接口；`provider/model` 路由 | `app/llm/` |
 | OpenAI / OneAPI / Ollama 无缝切换 | 同一套 OpenAI-compatible HTTP 客户端，按配置切换 base_url / Key | `app/llm/openai_compat.py`、`app/llm/registry.py` |
-| CrewAI 拆分研究 Agent / 报告撰写 Agent | 默认内置串行编排；另附可选的 CrewAI 适配器 | `app/engine/multi_agent.py`、`app/engine/crewai_engine.py` |
+| CrewAI 拆分研究 Agent / 报告撰写 Agent | 默认内置串行编排（研究 → 写作 → 审核，最多重写一次）；另附可选的 CrewAI 适配器 | `app/engine/multi_agent.py`、`app/engine/crewai_engine.py` |
 | 普通返回 + SSE 流式输出 | 同一业务服务同时支持 `stream=false/true` | `app/service.py`、`app/api/routes_chat.py` |
 | 集成文本转 PDF 工具 | Markdown → PDF，支持中文、表格、代码块、页码；自动字体子集化 | `app/tools/pdf.py` |
-| 文档导出 | 每次多 Agent 请求保存 `report.md` + `report.json`，可下载 PDF | `app/reports/store.py` |
-| 自动化测试 | 13 项离线测试，覆盖接口、SSE、鉴权、路由、PDF、检索 | `tests/` |
+| 文档导出 | 每次多 Agent 请求保存 `report.md` + `report.json`，审核重写时另存 `report.draft.md`，可下载 PDF | `app/reports/store.py` |
+| 自动化测试 | 18 项离线测试，覆盖接口、SSE、鉴权、路由、PDF、检索、审核重写 | `tests/` |
 
 > 说明：默认编排器是手写的，目的是让你能逐行读懂“多 Agent 到底怎么串起来”。CrewAI 作为可选适配器提供，见第 9 节。这样既不牺牲可运行性，也保留了你简历里的技术栈。
 
@@ -54,17 +54,17 @@ Markdown + JSON 元数据 + PDF 报告
 - **OpenAI 兼容接口**：`POST /v1/chat/completions`、`GET /v1/models`
 - **两种模式**：
   - `single`：一次模型调用，适合普通问答；
-  - `multi_agent`：检索 → 研究简报 → Markdown 报告，自动保存。
+  - `multi_agent`：检索 → 研究简报 → Markdown 报告 → 审核（未通过则重写一次）→ 保存。
 - **四种模型提供方**：
   - `mock/demo`：完全离线，零 Key，适合开发和测试；
   - `ollama/qwen2.5:7b`：本地模型；
   - `openai/gpt-4o-mini`：OpenAI 官方；
   - `oneapi/...`：OneAPI / New API 等 OpenAI 兼容代理。
-- **SSE 流式输出**：标准 `data:` 增量 + 自定义 `x_phase` 阶段事件；最后一条 `x_agent` 带报告元数据。
+- **SSE 流式输出**：标准 `data:` 增量 + 自定义 `x_phase` 阶段事件、`x_revision` 审核修改版事件；最后一条 `x_agent` 带报告元数据。
 - **检索增强**：默认检索 `data/knowledge/` 下的本地 Markdown；配置 Tavily Key 后可联网。
-- **报告资产**：Markdown、JSON 元数据、PDF；支持按 report_id 查询、列表、下载。
+- **报告资产**：Markdown、JSON 元数据、PDF；审核未通过时另存草稿版；支持按 report_id 查询、列表、下载。
 - **PDF 导出**：纯 Python 排版，不依赖 Word / LibreOffice；自动寻找中文字体并做子集化。
-- **离线 UI**：`/` 提供一个无构建步骤的演示页，能看阶段、流式正文、来源和 PDF 下载。
+- **离线 UI**：`/` 提供一个无构建步骤的演示页，能看阶段、流式草稿、审核修改版对照、来源和 PDF 下载。
 - **鉴权与 CORS**：可选 Bearer API Key；跨域来源可配置。
 - **Docker**：附 Dockerfile 与 docker-compose（含可选 Ollama 服务）。
 
@@ -74,7 +74,7 @@ Markdown + JSON 元数据 + PDF 报告
 
 ### 环境要求
 
-- Python **3.9+**（本机在 3.9.13 下通过 13 项测试；推荐 3.11 / 3.12）
+- Python **3.9+**（本机在 3.9.13 下通过 18 项测试；推荐 3.11 / 3.12）
 - 不需要 Node.js，不需要数据库
 - 默认 Mock 模式不需要任何 API Key 或 Ollama
 
@@ -211,14 +211,27 @@ curl -N http://127.0.0.1:8000/v1/chat/completions \
 流式返回的每一帧都是标准 `chat.completion.chunk`，另外可能带：
 
 - `x_phase`：`{stage, label, detail, agent, elapsed_ms}`；
-- `x_agent`：最终报告元数据，含 `report_id`、`pdf_url`、`sources`、`phases`。
+- `x_revision`：`{index, reason, markdown}`，审核未通过时的修改版全文，`delta` 为空；
+- `x_agent`：最终报告元数据，含 `report_id`、`pdf_url`、`draft_url`、`sources`、`phases`。
+
+> `x_revision` 是刻意的旁路通道：正文流（`delta`）只承载草稿，标准 OpenAI 客户端只会读到草稿，
+> 不会把草稿和修改版拼成一段。需要对照展示时，前端读 `x_revision` 渲染另一栏。
+
+请求还可以带一个可选字段：
+
+```json
+{"report_versions": "both"}
+```
+
+`both`（默认）表示审核重写后同时保存草稿和最终版，`final` 表示只保存最终版。
 
 ### 4.4 报告接口
 
 ```text
 GET /v1/reports                     报告列表
-GET /v1/reports/{report_id}         报告元数据
+GET /v1/reports/{report_id}         报告元数据（含 has_draft / has_pdf）
 GET /v1/reports/{report_id}/markdown
+GET /v1/reports/{report_id}/draft   草稿版 Markdown；审核一次通过的报告没有此文件
 GET /v1/reports/{report_id}/pdf     不存在时按需生成
 POST /v1/tools/pdf                  直接把任意 Markdown 转成 PDF
 ```
@@ -304,14 +317,18 @@ flowchart LR
     K --> KB[(data/knowledge)]
     K -. optional .-> T[Tavily]
     R --> W[Writer]
+    W --> V[Reviewer]
+    V -->|需修改| W
     W --> L
+    V --> L
     L --> M[Mock]
     L --> O[OpenAI-compatible HTTP]
     O --> OA[OpenAI]
     O --> OL[Ollama]
     O --> ONE[OneAPI / New API]
-    W --> RS[ReportStore]
+    V --> RS[ReportStore]
     RS --> MD[report.md]
+    RS --> DRAFT["report.draft.md<br/>可选"]
     RS --> JSON[report.json]
     RS --> PDF[report.pdf]
 ```
@@ -321,9 +338,10 @@ flowchart LR
 1. FastAPI 校验 OpenAI 格式的请求体；
 2. `ChatService.prepare()` 解析 `model`，通过 `LLMRegistry` 选择 provider；如果是 `multi_agent`，选择内置或 CrewAI 引擎；
 3. `MultiAgentEngine` 先检索本地 / 联网资料，调用研究 Agent 生成研究简报；
-4. 写作 Agent 基于“用户任务 + 研究简报 + 资料线索”流式生成 Markdown；
-5. `ChatService` 在完成后保存报告；如果 `export_pdf=true`，同步导出 PDF；
-6. 非流式请求返回完整 `chat.completion`；流式请求逐帧发送 `chat.completion.chunk`，最后发 `[DONE]`。
+4. 写作 Agent 基于“用户任务 + 研究简报 + 资料线索”流式生成 Markdown 草稿；
+5. 审核 Agent 检查草稿；未通过时按审核意见重写一次，修改版通过 `x_revision` 单独下发；
+6. `ChatService` 在完成后保存报告（默认同时保留草稿版）；如果 `export_pdf=true`，同步导出 PDF；
+7. 非流式请求返回完整 `chat.completion`；流式请求逐帧发送 `chat.completion.chunk`，最后发 `[DONE]`。
 
 更细的设计说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
@@ -353,9 +371,9 @@ multi-agent-service/
 │  ├─ engine/
 │  │  ├─ base.py              # Engine 事件模型
 │  │  ├─ single.py            # 单 Agent
-│  │  ├─ multi_agent.py       # 研究员 → 写作
+│  │  ├─ multi_agent.py       # 研究员 → 写作 → 审核（最多重写一次）
 │  │  ├─ crewai_engine.py     # 可选 CrewAI 适配器
-│  │  └─ prompts.py           # 三个系统提示词
+│  │  └─ prompts.py           # 四个系统提示词
 │  ├─ tools/
 │  │  ├─ knowledge.py         # 中文 bigram + IDF 本地检索；可选 Tavily
 │  │  └─ pdf.py               # Markdown → PDF 排版器
@@ -363,7 +381,7 @@ multi-agent-service/
 │  └─ static/index.html       # 无构建步骤的演示页
 ├─ data/knowledge/            # 示例知识库（可直接替换）
 ├─ data/reports/              # 运行后生成报告
-├─ tests/                     # 13 项离线测试
+├─ tests/                     # 18 项离线测试
 ├─ scripts/demo.py            # 不启服务直接跑
 ├─ docs/                      # 架构、学习路线、简历映射
 ├─ requirements*.txt
@@ -472,16 +490,15 @@ PyMuPDF 使用 AGPL-3.0 许可证；如果项目要商用，请先确认许可�
 
 ## 11. 继续扩展
 
-建议按难度递增：
+`Reviewer` Agent 已内置（见第 6 节）。下面按难度递增：
 
-1. 增加 `Reviewer` Agent：检查事实、结构、引用，再决定是否重写；
-2. 增加真正的引用编号：检索结果带 `[1]`，正文引用并在末尾列来源；
-3. 增加 token 级心跳：研究阶段每 15 秒发一次 SSE 注释，避免代理超时；
-4. 增加限流与幂等键：按 API Key / IP 限流，`Idempotency-Key` 防重复生成；
-5. 换成向量检索：sentence-transformers / BGE + FAISS，比较召回效果；
-6. 增加评测集：固定 20 个问题，比较不同模型的结构完整率、引用覆盖率和延迟；
-7. 增加 OpenTelemetry：记录首 token 延迟、阶段耗时、失败率；
-8. 接入对象存储和 PostgreSQL：把 `ReportStore` 换成生产实现。
+1. 增加真正的引用编号：检索结果带 `[1]`，正文引用并在末尾列来源；
+2. 增加 token 级心跳：研究阶段每 15 秒发一次 SSE 注释，避免代理超时；
+3. 增加限流与幂等键：按 API Key / IP 限流，`Idempotency-Key` 防重复生成；
+4. 换成向量检索：sentence-transformers / BGE + FAISS，比较召回效果；
+5. 增加评测集：固定 20 个问题，比较不同模型的结构完整率、引用覆盖率和延迟；
+6. 增加 OpenTelemetry：记录首 token 延迟、阶段耗时、失败率；
+7. 接入对象存储和 PostgreSQL：把 `ReportStore` 换成生产实现。
 
 学习路线和面试讲法见：
 

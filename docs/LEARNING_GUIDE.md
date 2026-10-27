@@ -157,6 +157,11 @@ Reviewer 的职责：
 - 如果 Reviewer 返回“需修改”，最多重写一次，避免无限循环；
 - 在 phases 里增加 `review` 阶段。
 
+> 当前仓库已完成本任务：`app/engine/multi_agent.py` 的 `review` / `rewrite` 阶段、
+> `app/engine/prompts.py` 的 `REVIEWER_SYSTEM`、`app/llm/mock.py` 的审核分支，
+> 以及 `tests/test_components.py` 里覆盖“审核未通过 → 重写”的测试。
+> 修改版通过 SSE 的 `x_revision` 单独下发，草稿与最终版可分别下载对照。
+
 ### 任务 B：让写作阶段支持“提纲确认”
 
 在研究和写作之间插入 `OUTLINE_SYSTEM`，先生成 5 条提纲，再让写作 Agent 按提纲写。比较报告结构稳定性。
@@ -251,11 +256,11 @@ docker compose up --build
 按这个顺序讲：
 
 1. **问题**：多模型接入 + 长报告不稳定 + 等待体验差；
-2. **方案**：OpenAI 兼容层 + 研究/写作双 Agent + SSE + 报告资产；
+2. **方案**：OpenAI 兼容层 + 研究/写作/审核三 Agent + SSE + 报告资产；
 3. **演示**：一次多 Agent 请求，展示阶段、正文、PDF；
 4. **取舍**：为什么默认内置编排、为什么文件存储、为什么 Mock；
 5. **边界**：还没有限流、队列、多租户、评测；
-6. **下一步**：Reviewer、引用校验、向量检索、可观测性。
+6. **下一步**：引用校验、向量检索、可观测性。
 
 ---
 
