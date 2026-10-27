@@ -101,13 +101,13 @@ routes_chat.py
 
 ```powershell
 ollama serve
-ollama pull qwen2.5:7b
+ollama pull qwen2:latest
 ```
 
-`.env`：
+在`.env`：
 
 ```dotenv
-DEFAULT_MODEL=ollama/qwen2.5:7b
+DEFAULT_MODEL=ollama/qwen2:latest
 OLLAMA_BASE_URL=http://localhost:11434/v1
 ```
 

@@ -39,13 +39,13 @@ class Settings(BaseSettings):
     default_model: str = "mock/demo"
     default_provider: str = "mock"
     openai_api_key: str = ""
-    openai_base_url: str = "https://api.openai.com/v1"
-    openai_model: str = "gpt-4o-mini"
+    openai_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    openai_model: str = "qwen3.8-max-0902"
     oneapi_api_key: str = ""
     oneapi_base_url: str = "http://localhost:3000/v1"
     oneapi_model: str = "gpt-4o-mini"
     ollama_base_url: str = "http://localhost:11434/v1"
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "qwen2:latest"
 
     request_timeout_seconds: float = Field(default=120.0, gt=0)
     provider_max_retries: int = Field(default=1, ge=0, le=5)
