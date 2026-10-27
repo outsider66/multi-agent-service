@@ -1,11 +1,18 @@
 from __future__ import annotations
-
+import re
 import logging
 import time
 from typing import AsyncIterator, Dict, List, Optional
 
-from app.engine.base import BaseEngine, EngineEvent, EngineResult, Phase, history_to_text
-from app.engine.prompts import RESEARCH_SYSTEM, WRITER_SYSTEM
+from app.engine.base import (
+    BaseEngine,
+    EngineEvent,
+    EngineResult,
+    Phase,
+    Revision,
+    history_to_text,
+)
+from app.engine.prompts import RESEARCH_SYSTEM, WRITER_SYSTEM, REVIEWER_SYSTEM
 from app.llm.base import BaseLLM, estimate_messages_tokens, estimate_tokens
 from app.tools.knowledge import KnowledgeBase, SearchResult, SearchService
 
@@ -138,10 +145,115 @@ class MultiAgentEngine(BaseEngine):
             pieces.append(delta)
             yield EngineEvent(type="delta", delta=delta)
         content = "".join(pieces)
+        draft = content  # 留住草稿：审核重写后 content 会变，草稿必须单独保留
         write_elapsed = int((time.perf_counter() - write_start) * 1000)
 
-        prompt_tokens = research.prompt_tokens + estimate_messages_tokens(writer_messages)
-        completion_tokens = research.completion_tokens + estimate_tokens(content)
+        # ---------- 阶段 3：审核（最多重写 1 次，避免无限循环） ----------
+        yield EngineEvent(
+            type="phase",
+            phase=Phase(
+                stage="review",
+                label="报告审核 Agent 开始审核",
+                detail="检查事实与推断、来源真实性、结构完整性",
+                agent="reviewer",
+            ),
+        )
+        review_messages = [
+            {"role": "system", "content": REVIEWER_SYSTEM},
+            {
+                "role": "user",
+                "content": f"""用户任务：
+{query}
+
+研究简报：
+{research.content}
+
+待审核报告：
+{content}
+
+请按要求输出审核结论。""",
+            },
+        ]
+        review_start = time.perf_counter()
+        review = await llm.complete(review_messages, temperature=0.0, max_tokens=600)
+        review_elapsed = int((time.perf_counter() - review_start) * 1000)
+        # _parse_review 返回 (bool, str)，必须解包；直接赋值得到的是元组，
+        # 元组恒为真，会导致“审核永远通过、从不重写”。
+        review_passed, review_reason = _parse_review(review.content)
+
+        revisions = 0
+        rewrite_messages: Optional[List[Dict[str, str]]] = None
+        if not review_passed:
+            yield EngineEvent(
+                type="phase",
+                phase=Phase(
+                    stage="rewrite",
+                    label="报告未通过审核，开始重写",
+                    detail=review_reason[:160],
+                    agent="reviewer",
+                    elapsed_ms=review_elapsed,
+                ),
+            )
+            # 草稿是 assistant 的产出，角色必须是 assistant；
+            # 再接一条 user 指令，避免两条连续 user 消息让模型误解上下文。
+            rewrite_messages = writer_messages + [
+                {"role": "assistant", "content": content},
+                {
+                    "role": "user",
+                    "content": f"""审核意见：
+{review_reason}
+
+请只修改被指出的问题，输出完整的新版 Markdown 报告全文，不要输出解释。""",
+                },
+            ]
+            rewritten = await llm.complete(
+                rewrite_messages, temperature=temperature, max_tokens=max_tokens
+            )
+            if rewritten.content.strip():
+                content = rewritten.content
+                revisions = 1
+                # 修改版走独立事件：SSE 层编码成 x_revision，不混进 delta 流，
+                # 否则标准 OpenAI 客户端会把草稿和修改版拼在一起。
+                yield EngineEvent(
+                    type="revision",
+                    revision=Revision(
+                        markdown=content,
+                        reason=review_reason[:300],
+                        index=revisions,
+                    ),
+                )
+
+        yield EngineEvent(
+            type="phase",
+            phase=Phase(
+                stage="review",
+                label="审核通过，可以交付" if review_passed else "已按审核意见完成一次重写",
+                detail=review_reason[:160],
+                agent="reviewer",
+                elapsed_ms=review_elapsed,
+            ),
+        )
+
+
+
+
+
+
+
+
+
+        prompt_tokens = (
+            research.prompt_tokens
+            + estimate_messages_tokens(writer_messages)
+            + review.prompt_tokens
+            + (estimate_messages_tokens(rewrite_messages) if rewrite_messages else 0)
+        )
+        completion_tokens = (
+            research.completion_tokens
+            + estimate_tokens(draft)
+            + (estimate_tokens(content) if revisions else 0)
+            + review.completion_tokens
+        )
         total_elapsed = int((time.perf_counter() - total_start) * 1000)
         phases = [
             Phase(
@@ -161,9 +273,16 @@ class MultiAgentEngine(BaseEngine):
             Phase(
                 stage="write",
                 label="生成 Markdown 报告",
-                detail=f"{len(content)} 字符",
+                detail=f"草稿 {len(draft)} 字符",
                 agent="writer",
                 elapsed_ms=write_elapsed,
+            ).public(),
+            Phase(
+                stage="review",
+                label="审核报告",
+                detail="通过" if review_passed else f"需修改，重写 {revisions} 次",
+                agent="reviewer",
+                elapsed_ms=review_elapsed,
             ).public(),
             Phase(
                 stage="done",
@@ -193,14 +312,20 @@ class MultiAgentEngine(BaseEngine):
                     for item in results
                 ],
                 research_preview=research.content[:800],
+                draft_content=draft if revisions else "",
                 metadata={
                     "mode": "multi_agent",
-                    "agents": ["researcher", "writer"],
+                    "agents": ["researcher", "writer", "reviewer"],
                     "source_count": len(results),
                     "research_brief_chars": len(research.content),
+                    "review_passed": review_passed,
+                    "review_revisions": revisions,
+                    "review_reason": review_reason[:200],
                 },
             ),
         )
+
+     
 
 
 def results_to_dicts(results: List[SearchResult]) -> List[Dict[str, object]]:
@@ -208,3 +333,23 @@ def results_to_dicts(results: List[SearchResult]) -> List[Dict[str, object]]:
         {"source": item.source, "title": item.title, "score": item.score, "url": item.url}
         for item in results
     ]
+
+
+
+_REVIEW_VERDICT = re.compile(r"审核结果\s*[:：]\s*(通过|需修改)")
+_REVISE_KEYWORDS = ("需修改", "需要修改", "不通过", "未通过")
+
+def _parse_review(text: str) -> tuple[bool, str]:
+    """把审核输出解析成 (是否通过, 原因摘要)。
+
+    解析不到明确结论时一律按“通过”处理：
+    - 避免模型啰嗦几句就触发一次昂贵的重写；
+    - mock / 弱模型返回非标准格式时不会让整条链路变脆。
+    """
+    match = _REVIEW_VERDICT.search(text)
+    if match:
+        return match.group(1) == "通过", text.strip()[:300]
+    head = text[:200]
+    if any(keyword in head for keyword in _REVISE_KEYWORDS):
+        return False, text.strip()[:300]
+    return True, "审核结论无法解析，按通过处理"

@@ -69,6 +69,7 @@ class ChatResult:
     report: Optional[Dict[str, Any]] = None  # 报告公开信息（不含正文）
     report_id: Optional[str] = None  # 报告 ID，可用于后续查询/下载
     pdf_url: Optional[str] = None  # PDF 下载地址（仅导出成功时存在）
+    draft_url: Optional[str] = None  # 草稿版 Markdown 地址（仅审核重写且保留草稿时存在）
 
     def agent_metadata(self) -> Dict[str, Any]:
         """汇总给客户端看的智能体元数据（对应 SSE 中的 `x_agent`）。"""
@@ -81,6 +82,7 @@ class ChatResult:
             "research_preview": self.research_preview,
             "report_id": self.report_id,
             "pdf_url": self.pdf_url,
+            "draft_url": self.draft_url,
             **self.metadata,
         }
 
@@ -89,13 +91,14 @@ class ChatResult:
 class ChatEvent:
     """服务层对外的细粒度事件，比 EngineEvent 多了一层 `done`。
 
-    EngineEvent: phase / delta / result   —— 引擎内部，result 是原始产物
-    ChatEvent:   phase / delta / done     —— 服务层，done 携带已持久化的 ChatResult
+    EngineEvent: phase / delta / revision / result  —— 引擎内部，result 是原始产物
+    ChatEvent:   phase / delta / revision / done    —— 服务层，done 携带已持久化的 ChatResult
     """
 
-    type: Literal["phase", "delta", "done"]
+    type: Literal["phase", "delta", "revision", "done"]
     phase: Optional[Dict[str, Any]] = None  # type == "phase" 时有效
     delta: str = ""  # type == "delta" 时有效：正文增量
+    revision: Optional[Dict[str, Any]] = None  # type == "revision" 时有效：审核后的修改版
     result: Optional[ChatResult] = None  # type == "done" 时有效：最终结果
 
 
@@ -174,9 +177,10 @@ class ChatService:
         """执行引擎，转发阶段/正文事件，最后完成报告持久化并产出 `done`。
 
         事件转换规则：
-        - EngineEvent.phase  → ChatEvent.phase（stage/label/detail/agent/elapsed_ms）
-        - EngineEvent.delta  → ChatEvent.delta（只转发非空增量）
-        - EngineEvent.result → 暂存，等引擎结束后统一持久化
+        - EngineEvent.phase    → ChatEvent.phase（stage/label/detail/agent/elapsed_ms）
+        - EngineEvent.delta    → ChatEvent.delta（只转发非空增量）
+        - EngineEvent.revision → ChatEvent.revision（审核后的修改版，独立通道）
+        - EngineEvent.result   → 暂存，等引擎结束后统一持久化
         """
         result: Optional[EngineResult] = None
         async for event in prepared.engine.run(
@@ -191,6 +195,15 @@ class ChatService:
                 yield ChatEvent(type="phase", phase=event.phase.public())
             elif event.type == "delta" and event.delta:
                 yield ChatEvent(type="delta", delta=event.delta)
+            elif event.type == "revision" and event.revision is not None:
+                yield ChatEvent(
+                    type="revision",
+                    revision={
+                        "index": event.revision.index,
+                        "reason": event.revision.reason[:300],
+                        "markdown": event.revision.markdown,
+                    },
+                )
             elif event.type == "result" and event.result is not None:
                 # 不立即下发，先拿去做持久化，避免“正文已推完但报告没存上”
                 result = event.result
@@ -203,6 +216,12 @@ class ChatService:
         report, pdf_url = await self._persist_report(
             prepared=prepared,
             result=result,
+        )
+        # 草稿只有在“审核重写且保留草稿”时才存在；前端据此显示下载入口
+        draft_url = (
+            f"/v1/reports/{report.id}/draft"
+            if report is not None and report.draft_filename
+            else None
         )
         mode = "multi_agent" if prepared.request.mode == "multi_agent" else "single"
         yield ChatEvent(
@@ -220,6 +239,7 @@ class ChatService:
                 report=report.public() if report else None,  # public() 不含 Markdown 正文
                 report_id=report.id if report else None,
                 pdf_url=pdf_url,
+                draft_url=draft_url,
             ),
         )
 
@@ -257,10 +277,19 @@ class ChatService:
             metadata["request_metadata"] = prepared.request.metadata
         metadata["research_preview"] = result.research_preview
 
+        # 草稿和最终版内容一致（审核通过）时没有保存价值，避免磁盘翻倍
+        include_draft = (
+            prepared.request.report_versions == "both"
+            and bool(result.draft_content.strip())
+            and result.draft_content != result.content
+        )
+        metadata["draft_saved"] = include_draft
+
         # 报告 ID 在这里生成（时间戳 + 随机串），磁盘 IO 放进线程池避免阻塞事件循环
         record = await asyncio.to_thread(
             self.reports.save,
             markdown=result.content,
+            draft_markdown=result.draft_content if include_draft else None,
             query=prepared.query,
             model=prepared.route.canonical_id,
             provider=prepared.route.provider,

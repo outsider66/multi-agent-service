@@ -8,13 +8,16 @@ import httpx
 import pytest
 
 from app.config import PROJECT_ROOT, Settings
+from app.engine.multi_agent import MultiAgentEngine
 from app.errors import BadRequestError, ProviderNotConfiguredError
+from app.llm.base import BaseLLM, LLMResult
 from app.llm.mock import MockLLM
 from app.llm.openai_compat import OpenAICompatibleLLM
 from app.llm.registry import LLMRegistry
 from app.reports.store import ReportStore
 from app.tools.knowledge import KnowledgeBase
 from app.tools.pdf import PDFExporter
+from tests.helpers import parse_sse
 
 
 def test_model_routing_and_missing_configuration():
@@ -233,3 +236,133 @@ def test_report_store_roundtrip(tmp_path):
 
     with pytest.raises(BadRequestError):
         store.get("../../etc/passwd")
+
+
+class _ScriptedLLM(BaseLLM):
+    """按提示词角色返回固定内容，用于覆盖审核未通过 → 重写这条分支。
+
+    MockLLM 永远返回“审核结果：通过”，测不到 revision 事件，
+    所以这里用脚本化的假模型。
+    """
+
+    provider = "test"
+    upstream_model = "scripted"
+
+    async def complete(self, messages, *, temperature=0.3, max_tokens=None):
+        system = "\n".join(
+            item.get("content", "")
+            for item in messages
+            if item.get("role") == "system"
+        )
+        if "「报告审核 Agent」" in system:
+            text = "审核结果：需修改\n原因：\n1. 缺少风险章节"
+        elif any(item.get("role") == "assistant" for item in messages):
+            text = "# 修改后的报告\n\n## 风险\n已补充风险章节"
+        else:
+            text = "## 研究简报\n\n主题：测试"
+        return LLMResult(
+            content=text,
+            prompt_tokens=10,
+            completion_tokens=5,
+            total_tokens=15,
+            upstream_model=self.upstream_model,
+        )
+
+    async def stream(self, messages, *, temperature=0.3, max_tokens=None):
+        yield "# 草稿报告\n\n"
+        yield "原始内容"
+
+
+class _EmptySearch:
+    async def search(self, query, limit=4):
+        return []
+
+
+def test_multi_agent_reviewer_emits_revision_and_keeps_draft():
+    engine = MultiAgentEngine(_EmptySearch())
+
+    async def scenario():
+        return [
+            event
+            async for event in engine.run(
+                query="写一份测试报告", history=[], llm=_ScriptedLLM()
+            )
+        ]
+
+    events = asyncio.run(scenario())
+
+    # 草稿照常以 delta 推送
+    streamed = "".join(event.delta for event in events if event.type == "delta")
+    assert streamed == "# 草稿报告\n\n原始内容"
+
+    # 修改版走独立 revision 事件，不污染 delta 流
+    revisions = [event.revision for event in events if event.type == "revision"]
+    assert len(revisions) == 1
+    assert revisions[0].markdown.startswith("# 修改后的报告")
+
+    result = next(event.result for event in events if event.type == "result")
+    assert result.content.startswith("# 修改后的报告")
+    assert result.draft_content == "# 草稿报告\n\n原始内容"
+    assert result.metadata["review_passed"] is False
+    assert result.metadata["review_revisions"] == 1
+    assert any(phase["stage"] == "review" for phase in result.phases)
+
+
+def test_report_store_saves_draft_version(tmp_path):
+    store = ReportStore(tmp_path / "reports")
+    record = store.save(
+        markdown="# 最终版\n\n正文",
+        draft_markdown="# 草稿版\n\n正文",
+        query="测试",
+        model="mock/demo",
+        provider="mock",
+        mode="multi_agent",
+        usage={"total_tokens": 12},
+    )
+    loaded = store.get(record.id)
+    assert loaded.public()["has_draft"] is True
+    assert store.draft_path(record.id).read_text(encoding="utf-8").startswith("# 草稿版")
+
+
+def test_sse_revision_frame_and_draft_saved(client, monkeypatch):
+    """端到端验证：修改版走 x_revision，草稿与最终版都落盘且可分别下载。"""
+    registry = client.app.state.registry
+    route = registry.resolve("mock/demo")
+    monkeypatch.setattr(registry, "get", lambda model=None: (_ScriptedLLM(), route))
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "mock/demo",
+            "messages": [{"role": "user", "content": "写一份测试报告"}],
+            "mode": "multi_agent",
+            "stream": True,
+        },
+    )
+    assert response.status_code == 200
+
+    chunks, done, error = parse_sse(response.text)
+    assert done is True
+    assert error is None
+
+    revisions = [chunk["x_revision"] for chunk in chunks if "x_revision" in chunk]
+    assert len(revisions) == 1
+    assert revisions[0]["markdown"].startswith("# 修改后的报告")
+    # 草稿正文流里不应混入修改版
+    body = "".join(
+        chunk["choices"][0]["delta"].get("content", "")
+        for chunk in chunks
+        if chunk.get("choices") and chunk["choices"][0].get("delta")
+    )
+    assert body.startswith("# 草稿报告")
+    assert "修改后的报告" not in body
+
+    final_meta = chunks[-1]["x_agent"]
+    report_id = final_meta["report_id"]
+    assert final_meta["draft_url"] == f"/v1/reports/{report_id}/draft"
+
+    final_md = client.get(f"/v1/reports/{report_id}/markdown")
+    assert final_md.text.startswith("# 修改后的报告")
+    draft_md = client.get(f"/v1/reports/{report_id}/draft")
+    assert draft_md.status_code == 200
+    assert draft_md.text.startswith("# 草稿报告")

@@ -33,6 +33,7 @@ def _chunk(
     usage: Any = None,
     phase: Any = None,
     agent: Any = None,
+    revision: Any = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "id": completion_id,
@@ -53,6 +54,9 @@ def _chunk(
         payload["x_phase"] = phase
     if agent is not None:
         payload["x_agent"] = agent
+    if revision is not None:
+        # 扩展字段：标准 OpenAI 客户端会忽略它，因此只看到草稿正文，不会串台
+        payload["x_revision"] = revision
     return payload
 
 
@@ -116,6 +120,17 @@ async def chat_completions(
                             created=created,
                             model=prepared.route.canonical_id,
                             delta={"content": event.delta},
+                        )
+                    )
+                elif event.type == "revision":
+                    # delta 留空：正文流只承载草稿，修改版走 x_revision
+                    yield _sse(
+                        _chunk(
+                            completion_id=completion_id,
+                            created=created,
+                            model=prepared.route.canonical_id,
+                            delta={},
+                            revision=event.revision,
                         )
                     )
                 elif event.type == "done" and event.result is not None:

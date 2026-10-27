@@ -38,6 +38,18 @@ async def get_report_markdown(report_id: str, request: Request):
     )
 
 
+@router.get("/v1/reports/{report_id}/draft")
+async def get_report_draft(report_id: str, request: Request):
+    """审核未通过时保留的草稿版；审核一次通过的报告没有这个文件。"""
+    store: ReportStore = request.app.state.reports
+    path = store.draft_path(report_id)
+    return FileResponse(
+        path,
+        media_type="text/markdown; charset=utf-8",
+        filename=f"{report_id}.draft.md",
+    )
+
+
 @router.get("/v1/reports/{report_id}/pdf")
 async def get_report_pdf(report_id: str, request: Request):
     store: ReportStore = request.app.state.reports

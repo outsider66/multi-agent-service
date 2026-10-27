@@ -2,7 +2,8 @@
 
 目录结构：
 data/reports/<report_id>/
-  report.md      可继续编辑的 Markdown
+  report.md      可继续编辑的 Markdown（最终版）
+  report.draft.md 审核未通过时的草稿版，可选
   report.json    标题、模型、usage、阶段、来源等元数据
   report.pdf     可选，导出后生成
 
@@ -50,13 +51,16 @@ class ReportRecord:
     phases: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     markdown: str = ""
+    draft_filename: Optional[str] = None
     pdf_filename: Optional[str] = None
 
     def public(self) -> Dict[str, Any]:
         data = asdict(self)
         data.pop("markdown", None)
+        data.pop("draft_filename", None)
         data.pop("pdf_filename", None)
         data["has_pdf"] = bool(self.pdf_filename)
+        data["has_draft"] = bool(self.draft_filename)
         return data
 
 
@@ -95,6 +99,7 @@ class ReportStore:
         phases: Optional[List[Dict[str, Any]]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         title: Optional[str] = None,
+        draft_markdown: Optional[str] = None,
     ) -> ReportRecord:
         with self._lock:
             self.root.mkdir(parents=True, exist_ok=True)
@@ -105,6 +110,10 @@ class ReportStore:
             final_title = (
                 title or title_from_markdown(markdown, fallback=query[:80] or "未命名报告")
             ).strip()
+            draft_filename: Optional[str] = None
+            if draft_markdown and draft_markdown.strip():
+                self._write_text(report_dir / "report.draft.md", draft_markdown)
+                draft_filename = "report.draft.md"
             record = ReportRecord(
                 id=report_id,
                 title=final_title,
@@ -118,6 +127,7 @@ class ReportStore:
                 phases=phases or [],
                 metadata=metadata or {},
                 markdown=markdown,
+                draft_filename=draft_filename,
             )
             self._write_text(report_dir / "report.md", markdown)
             self._write_json(report_dir / "report.json", self._serialize(record))
@@ -156,6 +166,8 @@ class ReportStore:
             data.pop("markdown", None)
             data["has_pdf"] = bool(data.get("pdf_filename"))
             data.pop("pdf_filename", None)
+            data["has_draft"] = bool(data.get("draft_filename"))
+            data.pop("draft_filename", None)
             # 列表接口保持轻量，不返回完整研究预览。
             metadata = data.get("metadata")
             if isinstance(metadata, dict):
@@ -167,7 +179,16 @@ class ReportStore:
     def markdown_path(self, report_id: str) -> Path:
         path = self._report_dir(report_id) / "report.md"
         if not path.exists():
-            raise NotFoundError(f"报告不存在：{report_id}", code="report_not_found")
+            raise NotFoundError("报告不存在", code="report_not_found")
+        return path
+
+    def draft_path(self, report_id: str) -> Path:
+        """草稿版 Markdown；审核一次通过的报告没有这个文件。"""
+        path = self._report_dir(report_id) / "report.draft.md"
+        if not path.exists():
+            raise NotFoundError(
+                f"该报告没有草稿版本：{report_id}", code="draft_not_found"
+            )
         return path
 
     def pdf_path(self, report_id: str) -> Path:

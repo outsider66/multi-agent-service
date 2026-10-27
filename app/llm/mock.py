@@ -146,11 +146,13 @@ class MockLLM(BaseLLM):
             text = _report(topic)
         elif "「研究员 Agent」" in system:
             text = _research_brief(topic)
+        elif "「报告审核 Agent」" in system:
+            text = "审核结果：通过\n\n原因：离线 Mock 模式下没有可核查的事实内容，按通过处理。"
         else:
             text = (
                 f"这是 ResearchCrew 的离线 Mock 回复。你问的是：{topic}\n\n"
                 "当前没有配置真实模型，因此我返回固定示例。把 DEFAULT_MODEL 改成 "
-                "`ollama/qwen2.5:7b` 或 `openai/gpt-4o-mini`，并配置对应服务后即可获得真实回答。"
+                "`ollama/qwen2:latest` 或 `openai/gpt-4o-mini`，并配置对应服务后即可获得真实回答。"
             )
         prompt_tokens = estimate_messages_tokens(messages)
         completion_tokens = estimate_tokens(text)

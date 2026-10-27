@@ -1,9 +1,10 @@
 """Pydantic 请求 / 响应模型。
 
-这里刻意保留了 OpenAI Chat Completions 的核心字段，同时增加三个教学用的扩展字段：
+这里刻意保留了 OpenAI Chat Completions 的核心字段，同时增加四个教学用的扩展字段：
 - mode: single / multi_agent
 - export_pdf: 是否在多智能体报告生成后自动导出 PDF
 - metadata: 调用方自定义的追踪信息（原样回传）
+- report_versions: 审核未通过时保存草稿 + 最终版（both），还是只保存最终版（final）
 """
 
 from __future__ import annotations
@@ -51,6 +52,8 @@ class ChatCompletionRequest(BaseModel):
     export_pdf: bool = False
     metadata: Optional[Dict[str, Any]] = None
     stream_options: Optional[Dict[str, Any]] = None
+    # 审核未通过时是否保留草稿版：both = 草稿 + 最终版都存，final = 只存最终版
+    report_versions: Literal["final", "both"] = "both"
 
     @model_validator(mode="after")
     def _validate_messages(self) -> "ChatCompletionRequest":

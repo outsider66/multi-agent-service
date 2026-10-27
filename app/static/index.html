@@ -62,6 +62,10 @@
       display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 20px; margin-top: 20px;
       align-items: start;
     }
+    .result-wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+    .result-wrap.has-revision { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .revision-panel { border-color: #bae6fd; }
+    .revision-panel .result-head { background: linear-gradient(180deg, #f0f9ff, #f8fcff); }
     .card {
       background: var(--card); border: 1px solid rgba(226, 232, 240, .9);
       border-radius: var(--radius); box-shadow: 0 10px 30px rgba(15, 39, 67, .045);
@@ -164,6 +168,7 @@
       .panel { position: static; }
       .result { min-height: 520px; }
       .article { padding: 20px; }
+      .result-wrap.has-revision { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -179,7 +184,7 @@
       </div>
       <div class="top-meta">
         <span class="pill"><span class="dot"></span><span id="health">服务检测中</span></span>
-        <span class="pill">Researcher → Writer</span>
+        <span class="pill">Researcher → Writer → Reviewer</span>
         <a class="pill" href="/docs" target="_blank" rel="noreferrer">API Docs ↗</a>
       </div>
     </header>
@@ -215,13 +220,14 @@
         </div>
 
         <label class="check"><input type="checkbox" id="exportPdf" checked /> 生成后自动导出 PDF</label>
+        <label class="check"><input type="checkbox" id="saveDraft" checked /> 审核未通过时保留草稿版</label>
         <button class="primary" id="send">生成报告</button>
         <div class="status-line"><span id="status">就绪</span><span id="latency">--</span></div>
         <div class="error" id="error"></div>
 
         <div class="timeline">
           <h3>协作时间线</h3>
-          <div id="phases"><div class="phase"><strong>等待开始</strong><span>研究 Agent → 写作 Agent</span></div></div>
+          <div id="phases"><div class="phase"><strong>等待开始</strong><span>研究 Agent → 写作 Agent → 审核 Agent</span></div></div>
         </div>
 
         <div class="sources" id="sourcesBox">
@@ -230,32 +236,48 @@
         </div>
       </aside>
 
-      <main class="card result">
-        <div class="result-head">
-          <div>
-            <h2 id="resultTitle">报告预览</h2>
-            <p id="resultSub">流式输出会实时显示在这里</p>
+      <div class="result-wrap" id="resultWrap">
+        <main class="card result">
+          <div class="result-head">
+            <div>
+              <h2 id="resultTitle">报告预览（草稿）</h2>
+              <p id="resultSub">流式输出会实时显示在这里</p>
+            </div>
+            <div class="actions">
+              <button class="ghost" id="copy" disabled>复制 Markdown</button>
+              <a class="ghost" id="downloadDraft" href="#" hidden>下载草稿</a>
+              <a class="ghost" id="download" href="#" disabled>下载 PDF</a>
+            </div>
           </div>
-          <div class="actions">
-            <button class="ghost" id="copy" disabled>复制 Markdown</button>
-            <a class="ghost" id="download" href="#" disabled>下载 PDF</a>
+          <div class="article" id="article">
+            <div class="empty">
+              <div class="big">◎</div>
+              输入问题后点击「生成报告」<br />
+              多 Agent 模式会先检索资料，再由写作 Agent 输出 Markdown 报告。
+            </div>
           </div>
-        </div>
-        <div class="article" id="article">
-          <div class="empty">
-            <div class="big">◎</div>
-            输入问题后点击「生成报告」<br />
-            多 Agent 模式会先检索资料，再由写作 Agent 输出 Markdown 报告。
+        </main>
+
+        <aside class="card result revision-panel" id="revisionPanel" hidden>
+          <div class="result-head">
+            <div>
+              <h2>审核修改版</h2>
+              <p id="revisionReason">—</p>
+            </div>
+            <div class="actions">
+              <button class="ghost" id="copyRevision" disabled>复制修改版</button>
+            </div>
           </div>
-        </div>
-      </main>
+          <div class="article" id="revisionArticle"></div>
+        </aside>
+      </div>
     </div>
     <div class="footnote">ResearchCrew · 教学项目 · 报告由 AI 生成，请人工复核事实与引用</div>
   </div>
 
   <script>
     const $ = (selector) => document.querySelector(selector);
-    const state = { mode: "multi_agent", content: "", reportId: null, pdfUrl: null, running: false, lastRender: 0 };
+    const state = { mode: "multi_agent", content: "", revision: "", reportId: null, pdfUrl: null, running: false, lastRender: 0 };
     const queryEl = $("#query");
     const modelEl = $("#model");
     const articleEl = $("#article");
@@ -436,15 +458,23 @@
       clearError();
       state.running = true;
       state.content = "";
+      state.revision = "";
       state.reportId = null;
       state.pdfUrl = null;
       state.lastRender = 0;
       $("#send").disabled = true;
       $("#send").textContent = "生成中…";
       $("#copy").disabled = true;
+      $("#copyRevision").disabled = true;
       $("#download").removeAttribute("href");
       $("#download").setAttribute("disabled", "disabled");
-      $("#resultTitle").textContent = "报告预览";
+      $("#downloadDraft").hidden = true;
+      $("#downloadDraft").removeAttribute("href");
+      $("#revisionPanel").hidden = true;
+      $("#resultWrap").classList.remove("has-revision");
+      $("#revisionArticle").innerHTML = "";
+      $("#revisionReason").textContent = "—";
+      $("#resultTitle").textContent = "报告预览（草稿）";
       $("#resultSub").textContent = state.mode === "multi_agent" ? "研究 Agent 正在检索与思考" : "助手正在生成";
       articleEl.innerHTML = '<div class="empty"><div class="big">✦</div>正在生成，请稍候…</div>';
       resetPhases();
@@ -460,6 +490,7 @@
             stream: true,
             mode: state.mode,
             export_pdf: $("#exportPdf").checked,
+            report_versions: $("#saveDraft").checked ? "both" : "final",
             temperature: 0.3
           })
         });
@@ -504,10 +535,24 @@
               const now = performance.now();
               if (now - state.lastRender > 110) { state.lastRender = now; updateArticle(true); }
             }
+            if (payload.x_revision) {
+              state.revision = payload.x_revision.markdown || "";
+              $("#revisionPanel").hidden = false;
+              $("#resultWrap").classList.add("has-revision");
+              $("#revisionReason").textContent =
+                (payload.x_revision.reason || "").slice(0, 160) || "审核未通过，已生成修改版";
+              $("#revisionArticle").innerHTML = renderMarkdown(state.revision);
+              $("#copyRevision").disabled = !state.revision;
+              $("#resultSub").textContent = "草稿未通过审核，右侧为修改版";
+            }
             if (payload.x_agent) {
               state.reportId = payload.x_agent.report_id;
               state.pdfUrl = payload.x_agent.pdf_url;
               renderSources(payload.x_agent.sources);
+              if (payload.x_agent.draft_url) {
+                $("#downloadDraft").href = payload.x_agent.draft_url;
+                $("#downloadDraft").hidden = false;
+              }
               if (state.pdfUrl) {
                 $("#download").href = state.pdfUrl;
                 $("#download").removeAttribute("disabled");
@@ -552,6 +597,13 @@
         await navigator.clipboard.writeText(state.content);
         $("#copy").textContent = "已复制";
         setTimeout(() => { $("#copy").textContent = "复制 Markdown"; }, 1500);
+      } catch (error) { showError("复制失败，请手动选择正文"); }
+    });
+    $("#copyRevision").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(state.revision);
+        $("#copyRevision").textContent = "已复制";
+        setTimeout(() => { $("#copyRevision").textContent = "复制修改版"; }, 1500);
       } catch (error) { showError("复制失败，请手动选择正文"); }
     });
 

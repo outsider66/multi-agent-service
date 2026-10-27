@@ -32,6 +32,20 @@ class Phase:
 
 
 @dataclass
+class Revision:
+    """审核未通过后的一次重写结果。
+
+    单独建模而不是塞进 metadata，是因为它要同时被：
+    - SSE 层编码成 `x_revision` 扩展帧（不影响标准 OpenAI 的 delta 流）；
+    - 服务层拿去决定是否把草稿也落盘。
+    """
+
+    markdown: str
+    reason: str = ""
+    index: int = 1
+
+
+@dataclass
 class EngineResult:
     content: str
     usage: Dict[str, int] = field(default_factory=dict)
@@ -39,13 +53,15 @@ class EngineResult:
     sources: List[Dict[str, Any]] = field(default_factory=list)
     research_preview: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
+    draft_content: str = ""  # 草稿版正文；审核通过（未重写）时为空
 
 
 @dataclass
 class EngineEvent:
-    type: Literal["phase", "delta", "result"]
+    type: Literal["phase", "delta", "revision", "result"]
     phase: Optional[Phase] = None
     delta: str = ""
+    revision: Optional[Revision] = None
     result: Optional[EngineResult] = None
 
 
