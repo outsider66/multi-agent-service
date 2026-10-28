@@ -504,7 +504,6 @@ PyMuPDF 使用 AGPL-3.0 许可证；如果项目要商用，请先确认许可�
 
 - [docs/LEARNING_GUIDE.md](docs/LEARNING_GUIDE.md)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [docs/RESUME_MAPPING.md](docs/RESUME_MAPPING.md)
 
 ---
 
